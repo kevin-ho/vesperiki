@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vesperiki"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "mcp>=1.10,<2",
+    "httpx",
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+include = ["vesperiki*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

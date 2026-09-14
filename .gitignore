@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Vesperiki data
+*.db
+*.db-wal
+*.db-shm
+data/
+*.db.init.lock
+
+# Node deps / caches
+node_modules/
+
+# Local planning docs (canonical copies live outside the repo)
+vesperiki-brief.md
+vesperiki-*-coding-plan.md
+
+# Local dev server artifacts
+.devserver/
+
+# Local design references
+.design-ref/
+
+# Local overlay build artifact (not repo content)
+frontend/public/frontman/
+

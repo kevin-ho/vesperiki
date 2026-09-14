@@ -1,0 +1,190 @@
+@import "tailwindcss";
+@import "./theme.css";
+@plugin "tailwindcss-react-aria-components";
+@theme inline { --color-bg: var(--color-bg); --color-surface: var(--color-surface); --color-text: var(--color-text); --color-muted: var(--color-muted); --color-border: var(--color-border); --color-table-border: var(--color-table-border); --color-peach: var(--color-peach); --color-butter: var(--color-butter); --color-sage: var(--color-sage); --color-rose: var(--color-rose); --color-lavender: var(--color-lavender); --color-peach-text: var(--color-peach-text); --color-butter-text: var(--color-butter-text); --color-sage-text: var(--color-sage-text); --color-rose-text: var(--color-rose-text); --color-lavender-text: var(--color-lavender-text); --shadow-brutal: var(--shadow-brutal); --font-display: var(--font-display); --font-body: var(--font-body); --font-mono: var(--font-mono); }
+@layer base { * { box-sizing: border-box; } html { scroll-padding-top: 6rem; } body { margin: 0; background: var(--color-bg); color: var(--color-text); font-family: var(--font-body); line-height: 1.7; } a { color: inherit; } }
+/* No sticky top header on desktop — anchors only need a small
+   clearance there; the 6rem offset stays for mobile where the
+   locked top bar exists. */
+@media (min-width: 48rem) {
+  html { scroll-padding-top: 1rem; }
+}
+/* Desktop app shell (>=768px): slim icon rail on the far left with
+   content filling the remaining width. Below 768px the shell is a
+   plain block and the rail is hidden (mobile keeps the locked top
+   bar). The rail is sticky so it stays put while the column
+   scrolls; content starts at the rail and extends wide — no
+   centered max-width cage. */
+.app-rail-wordmark {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.12em;
+}
+@media (min-width: 48rem) {
+  .app-shell { display: grid; grid-template-columns: 4rem minmax(0, 1fr); }
+  .app-rail {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    border-right: 3px solid var(--color-border);
+    background: var(--color-bg);
+  }
+}
+/* Reader TOC column (>=1200px only): sticky right-hand column next
+   to the article. Below 1200px the TOC is not rendered at all; the
+   grid collapses to the single article column. */
+@media (min-width: 75rem) {
+  .reader-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 16rem;
+    column-gap: 3rem;
+    align-items: start;
+  }
+  .reader-toc {
+    position: sticky;
+    top: 1rem;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+  }
+}
+/* Element-level focus fallback so native controls that aren't styled
+   with the `.focus-ring` utility still show a visible focus ring.
+   The `:not(.focus-ring)` guard prevents double-outlining elements
+   that already opt in. */
+input:focus-visible:not(.focus-ring),
+textarea:focus-visible:not(.focus-ring),
+button:focus-visible:not(.focus-ring),
+a:focus-visible:not(.focus-ring) { outline: 3px solid var(--color-text); outline-offset: 4px; }
+.focus-ring:focus-visible { outline: 3px solid var(--color-text); outline-offset: 4px; }
+.markdown {
+  font-size: 1.125rem;
+} .markdown h1,.markdown h2,.markdown h3 { font-family: var(--font-display); line-height: 1.15; margin: 2rem 0 1rem; } .markdown h2 { font-size: 1.875rem; } .markdown h3 { font-size: 1.25rem; } .markdown p { margin: 1rem 0; } .markdown a { text-decoration: underline; font-weight: 600; } .markdown ul { list-style: disc; padding-left: 1.5rem; } .markdown ol { list-style: decimal; padding-left: 1.5rem; } .markdown blockquote {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  line-height: 1.3;
+  border: 3px solid var(--color-border);
+  background: var(--color-butter);
+  padding: 1.5rem 2rem;
+  box-shadow: var(--shadow-brutal);
+  margin: 2rem 0;
+} .markdown :not(pre) > code { background: var(--color-butter); color: var(--color-text); padding: .1rem .3rem; font-family: var(--font-mono); font-size: 0.75rem; }
+.markdown pre {
+  border: 3px solid var(--color-border);
+  background: var(--color-text);
+  color: var(--color-bg);
+  padding: 1rem;
+  overflow-x: auto;
+}
+.markdown pre code { display: inline-block; text-align: left; background: transparent; padding: 0; font-size: 0.875rem; color: inherit; }
+/* Markdown tables render inside a React Aria ResizableTableContainer
+   (the .table-scroll wrapper, see MarkdownTable) which owns the
+   horizontal scroll: wide tables exceed the content column and scroll
+   inside the wrapper. The wrapper spans the reading column's full
+   content width (the wide left-aligned layout — no viewport
+   breakout). Scrolling the <table> element itself would need
+   display:block, which breaks border-collapse. */
+.markdown .table-scroll {
+  overflow-x: auto;
+  /* Scroll-shadow hint: two edge fades that scroll WITH the content
+     (background-attachment: local) over two subtle shadows pinned to
+     the wrapper edges (attachment: scroll). The fades mask the
+     shadows while content is flush against an edge, so the hint only
+     shows on sides that still have more content to scroll to. Colors
+     derive from existing theme vars so the hint works in both themes. */
+  background:
+    linear-gradient(to right, var(--color-bg) 30%, transparent),
+    linear-gradient(to left, var(--color-bg) 30%, transparent),
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--color-border) 20%, transparent),
+      transparent
+    ),
+    linear-gradient(
+      to left,
+      color-mix(in srgb, var(--color-border) 20%, transparent),
+      transparent
+    );
+  background-position: left center, right center, left center, right center;
+  background-repeat: no-repeat;
+  background-size: 40px 100%, 40px 100%, 12px 100%, 12px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+.markdown .table-scroll table {
+  border-collapse: collapse;
+  font-family: var(--font-display);
+  /* RAC's ResizableTableContainer forces inline width: min-content +
+     table-layout: fixed on the <table> (dist/private/Table.js), which
+     collapses it to the narrowest content. width: 100% is required so
+     the 1fr columns stretch to the measured container width; inline
+     style beats class CSS, so !important is needed. min-width: 100%
+     guarantees the table fills the container even before width
+     resolves. */
+  width: 100% !important;
+  min-width: 100%;
+}
+/* RAC Table renders a real <table> with <th>/<td> cells and ARIA
+   roles, so the element selectors below still apply. Body cells stay
+   regular-weight (Space Grotesk 400 — index.html loads wght@400;700);
+   only headers get the bold display weight. th also gets extra right
+   padding so header text clears the absolute-positioned ColumnResizer. */
+.markdown table td,
+.markdown table th {
+  border: 1px solid var(--color-table-border);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: break-word;
+}
+.markdown table td {
+  font-weight: 400;
+}
+.markdown table th {
+  background: var(--color-surface);
+  font-weight: 700;
+  padding-right: 1.25rem;
+}
+
+/* GitHub-style alert callouts. The remark-callouts plugin tags
+   blockquotes whose first paragraph starts with `[!NOTE]` (or
+   `[!WARNING]` / `[!TIP]` / `[!IMPORTANT]` / `[!CAUTION]`) with the
+   `callout` and `callout-<type>` classes. The marker text is
+   stripped from the body; the label is rendered by the React
+   `CalloutBlockquote` component. The generic blockquote rule above
+   is left untouched so plain quotes still render as before. */
+.markdown .callout {
+  border: 3px solid var(--color-border);
+  background: var(--color-butter);
+  box-shadow: var(--shadow-brutal);
+  margin: 2rem 0;
+  padding: 1.25rem 1.5rem;
+  font-size: 1.125rem;
+  line-height: 1.5;
+}
+.markdown .callout-note { background: var(--color-butter); }
+.markdown .callout-tip { background: var(--color-sage); }
+.markdown .callout-warning { background: var(--color-peach); }
+.markdown .callout-important { background: var(--color-lavender); }
+.markdown .callout-caution { background: var(--color-rose); }
+.markdown .callout-label {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+}
+.markdown .callout-body > :first-child { margin-top: 0; }
+.markdown .callout-body > :last-child { margin-bottom: 0; }
+
+/* Honor the user's reduced-motion preference (WCAG 2.3.3). The
+   !important flags override any inline transition/animation rules
+   declared elsewhere in the bundle so motion-sensitive users get a
+   stable, non-animated experience by default. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
