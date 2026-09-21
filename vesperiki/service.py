@@ -1463,14 +1463,19 @@ def search_semantic(query: str, *, limit: int = 10, include_body: bool = False,
             "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ?",
             (vec.serialize_float32(vector), k),
         ).fetchall()
-        results: list[dict] = []
-        seen: set[int] = set()
+        # vec0 normally returns nearest neighbors first, but page-level
+        # aggregation must not depend on that implementation detail: several
+        # chunks can belong to one page, and filters can remove earlier rows.
+        # Keep the best matching chunk for each page and sort explicitly for a
+        # stable contract (distance first, chunk id as the deterministic tie
+        # breaker).
+        best_by_page: dict[int, tuple[float, int, sqlite3.Row]] = {}
         for match in matches:
             row = conn.execute(
                 "SELECT c.*, p.slug, p.title, p.type, p.body, p.status FROM page_chunks c JOIN pages p ON p.id=c.page_id WHERE c.chunk_id=?",
                 (match["chunk_id"],),
             ).fetchone()
-            if row is None or row["status"] == "deprecated" or row["page_id"] in seen:
+            if row is None or row["status"] == "deprecated":
                 continue
             if type is not None and row["type"] != type:
                 continue
@@ -1479,15 +1484,47 @@ def search_semantic(query: str, *, limit: int = 10, include_body: bool = False,
                 (row["page_id"], tag),
             ).fetchone() is None:
                 continue
-            seen.add(row["page_id"])
-            item = {"slug": row["slug"], "title": row["title"], "type": row["type"],
-                    "snippet": row["body"], "distance": match["distance"], "match": "semantic"}
+            candidate = (float(match["distance"]), int(row["chunk_id"]), row)
+            previous = best_by_page.get(int(row["page_id"]))
+            if previous is None or candidate[:2] < previous[:2]:
+                best_by_page[int(row["page_id"])] = candidate
+
+        results: list[dict] = []
+        for distance, _chunk_id, row in sorted(
+            best_by_page.values(), key=lambda item: (item[0], item[1])
+        )[:limit]:
+            item = {
+                "slug": row["slug"],
+                "title": row["title"],
+                "type": row["type"],
+                "snippet": row["body"],
+                "heading_path": row["heading_path"],
+                "distance": distance,
+                "match": "semantic",
+            }
             if include_body:
                 item["body"] = row["body"]
             results.append(item)
-            if len(results) >= limit:
-                break
         return results
+
+
+def _rrf_fuse(keyword: list[dict], semantic: list[dict], *, limit: int) -> list[dict]:
+    """Fuse ranked page results with deterministic, page-level RRF.
+
+    A page returned by both modes is represented once.  The first result seen
+    is retained so the established keyword schema remains intact when a page
+    has equal fusion scores; the score ordering itself is independent of
+    provider distance/BM25 units.
+    """
+    scores: dict[str, float] = {}
+    items: dict[str, dict] = {}
+    for ranked in (keyword, semantic):
+        for rank, item in enumerate(ranked, start=1):
+            slug = item["slug"]
+            scores[slug] = scores.get(slug, 0.0) + 1 / (60 + rank)
+            items.setdefault(slug, item)
+    ordered = sorted(scores, key=lambda slug: (-scores[slug], slug))
+    return [items[slug] for slug in ordered[:limit]]
 
 
 def search_hybrid(query: str, *, limit: int = 10, include_body: bool = False,
@@ -1497,15 +1534,11 @@ def search_hybrid(query: str, *, limit: int = 10, include_body: bool = False,
         semantic = search_semantic(query, limit=limit, include_body=include_body, type=type, tag=tag)
     except (ServiceError, embeddings.EmbedError) as exc:
         return {"results": keyword, "semantic": False, "note": _semantic_failure_note(exc), "modes": {"keyword": True, "semantic": False}}
-    fused: dict[str, tuple[float, dict]] = {}
-    for rank, item in enumerate(keyword):
-        score, existing = fused.get(item["slug"], (0.0, item))
-        fused[item["slug"]] = (score + 1 / (60 + rank + 1), existing)
-    for rank, item in enumerate(semantic):
-        score, existing = fused.get(item["slug"], (0.0, item))
-        fused[item["slug"]] = (score + 1 / (60 + rank + 1), existing)
-    results = [item for _, item in sorted(fused.values(), key=lambda pair: -pair[0])][:limit]
-    return {"results": results, "semantic": True, "modes": {"keyword": True, "semantic": True}}
+    return {
+        "results": _rrf_fuse(keyword, semantic, limit=limit),
+        "semantic": True,
+        "modes": {"keyword": True, "semantic": True},
+    }
 
 
 # ---------------------------------------------------------------------------

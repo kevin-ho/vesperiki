@@ -472,7 +472,14 @@ def _register_routes(app: FastAPI, db_path: str) -> None:
             return keyword
         try:
             if mode == "semantic":
-                return {"results": service.search_semantic(query=q, limit=limit, include_body=include_body, tag=tag, type=type), "semantic": True, "served_by": "semantic"}
+                return {
+                    "results": service.search_semantic(
+                        query=q, limit=limit, include_body=include_body,
+                        tag=tag, type=type,
+                    ),
+                    "semantic": True,
+                    "served_by": "semantic",
+                }
             return service.search_hybrid(query=q, limit=limit, include_body=include_body, tag=tag, type=type)
         except (service.ServiceError, service.embeddings.EmbedError) as exc:
             return {

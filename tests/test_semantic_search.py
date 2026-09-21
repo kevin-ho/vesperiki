@@ -1,6 +1,7 @@
 """Semantic-search contract tests; all provider traffic uses MockTransport."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -21,11 +22,42 @@ def semantic_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VESPERIKI_EMBED_BATCH", "2")
     monkeypatch.setenv("VESPERIKI_WRITER", "test")
     monkeypatch.setenv("VESPERIKI_CLIENT", "pytest")
+    def mock_embedding(text: str) -> list[float]:
+        """A deterministic, structure-preserving test embedding.
+
+        It is intentionally not an LLM: dimensions expose stable text
+        structure (paragraphs, headings, characters) plus a digest-derived
+        component, so distance/order assertions are meaningful without
+        making provider traffic or relying on Python's randomized hash().
+        """
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        paragraphs = [part for part in text.split("\n\n") if part]
+        headings = sum(line.startswith("#") for line in text.splitlines())
+        lower = text.lower()
+        # A tiny committed golden vocabulary models a provider's paraphrase
+        # behavior while retaining text structure in the other dimensions.
+        concepts = (
+            ("travel", "trip", "itinerary", "journey"),
+            ("depart", "departure", "leaves", "flight"),
+        )
+        concept_features = [
+            float(any(word in lower for word in group)) for group in concepts
+        ]
+        return [
+            *concept_features,
+            float(len(text)),
+            float(len(paragraphs)),
+            float(headings),
+            float(sum(text.encode("utf-8")) % 997),
+            float(int.from_bytes(digest[:4], "big") / 2**32),
+            float(int.from_bytes(digest[4:8], "big") / 2**32),
+        ]
+
     def transport(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         values = payload["input"] if isinstance(payload["input"], list) else [payload["input"]]
         return httpx.Response(200, json={"data": [
-            {"index": i, "embedding": [float(len(text)), 1.0, 0.0]}
+            {"index": i, "embedding": mock_embedding(text)}
             for i, text in enumerate(values)
         ]})
     real_client = httpx.Client
@@ -112,7 +144,53 @@ def test_20_hybrid_fallback(semantic_env, monkeypatch):
 
 def test_21_semantic_result_shape(semantic_env):
     service.create_page(slug="a", title="A", body="alpha"); service.drain_embed_queue()
-    assert service.search_semantic("x")[0]["match"] == "semantic"
+    result = service.search_semantic("x")[0]
+    assert result["match"] == "semantic"
+    assert {"slug", "title", "type", "snippet", "heading_path", "distance"} <= result.keys()
+
+
+def test_26_page_aggregation_orders_best_chunk_and_preserves_heading(semantic_env):
+    service.create_page(
+        slug="a", title="A", body="## First\nshort\n\n## Second\n" + "long " * 40,
+    )
+    service.create_page(slug="b", title="B", body="other")
+    service.drain_embed_queue()
+    # The deterministic transport embeds text length, so the short chunk is
+    # the nearest match.  The page must still be represented once with that
+    # chunk's heading, rather than whichever chunk vec0 happens to return first.
+    rows = service.search_semantic("short", limit=10)
+    a = next(row for row in rows if row["slug"] == "a")
+    assert a["heading_path"] == "First"
+    assert [row["slug"] for row in rows].count("a") == 1
+
+
+def test_27_revive_requeues_and_restores_visibility(semantic_env):
+    service.create_page(slug="a", title="A", body="revivable")
+    service.drain_embed_queue()
+    service.delete_page(slug="a")
+    assert service.search_semantic("revivable") == []
+    service.revive_page(slug="a")
+    assert service.drain_embed_queue()["embedded"] >= 1
+    assert service.search_semantic("revivable")[0]["slug"] == "a"
+
+
+def test_28_golden_paraphrase_has_zero_lexical_overlap(semantic_env):
+    service.create_page(
+        slug="europe", title="Europe", body="The flight departs at dawn for the trip.",
+    )
+    service.drain_embed_queue()
+    assert service.search_pages(query="Europe trip itinerary flight departure") == []
+    assert service.search_semantic("journey leaves")[0]["slug"] == "europe"
+
+
+def test_29_rrf_deduplicates_and_uses_one_based_ranks():
+    fused = service._rrf_fuse(
+        [{"slug": "same", "source": "keyword"}, {"slug": "key", "source": "keyword"}],
+        [{"slug": "sem", "source": "semantic"}, {"slug": "same", "source": "semantic"}],
+        limit=10,
+    )
+    assert [item["slug"] for item in fused] == ["same", "sem", "key"]
+    assert sum(item["slug"] == "same" for item in fused) == 1
 
 def test_22_api_keyword_shape(semantic_env):
     app = create_app(str(semantic_env)); assert app is not None

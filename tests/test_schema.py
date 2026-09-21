@@ -25,6 +25,25 @@ def fts_page_ids(conn: sqlite3.Connection, query: str) -> list[int]:
     ]
 
 
+def test_migration_on_live_old_schema_materializes_and_queues_pages(tmp_path):
+    """An existing page corpus gets semantic bookkeeping on first reopen."""
+    path = tmp_path / "old.db"
+    # Start from the current schema, then remove only the Phase 7 objects;
+    # this models a real pre-semantic database while retaining all prior
+    # triggers, indexes, and lookup tables required by schema verification.
+    with init_db(path) as conn:
+        conn.execute("INSERT INTO pages(slug, title, title_norm, body) VALUES ('legacy', 'Legacy', 'legacy', 'old content')")
+        conn.commit()
+    with sqlite3.connect(path) as conn:
+        conn.executescript("DROP TABLE embed_queue; DROP TABLE embed_config; DROP TABLE page_chunks;")
+        conn.commit()
+
+    with init_db(path) as conn:
+        assert conn.execute("SELECT count(*) FROM page_chunks").fetchone()[0] == 1
+        assert conn.execute("SELECT page_id FROM embed_queue").fetchone()[0] == 1
+        assert conn.execute("SELECT body FROM page_chunks").fetchone()[0] == "old content"
+
+
 def test_init_creates_file(tmp_path):
     path = tmp_path / "t.db"
 
