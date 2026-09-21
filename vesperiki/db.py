@@ -405,6 +405,25 @@ SCHEMA_SQL = dedent(
         FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
     );
     CREATE INDEX idx_corrections_status ON corrections(status);
+
+    CREATE TABLE page_chunks (
+        chunk_id INTEGER PRIMARY KEY,
+        page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        heading_path TEXT NOT NULL DEFAULT '',
+        body TEXT NOT NULL,
+        char_count INTEGER NOT NULL,
+        embedding_model TEXT,
+        embedding_dim INTEGER,
+        embedded_at TEXT,
+        stale INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX idx_page_chunks_page ON page_chunks(page_id, seq);
+    CREATE TABLE embed_queue (
+        page_id INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+        queued_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE embed_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """
 )
 
@@ -427,6 +446,21 @@ _MIGRATIONS_SQL = dedent(
         FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_corrections_status ON corrections(status);
+    CREATE TABLE IF NOT EXISTS page_chunks (
+        chunk_id INTEGER PRIMARY KEY,
+        page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        heading_path TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
+        char_count INTEGER NOT NULL, embedding_model TEXT, embedding_dim INTEGER,
+        embedded_at TEXT, stale INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_page_chunks_page ON page_chunks(page_id, seq);
+    CREATE TABLE IF NOT EXISTS embed_queue (
+        page_id INTEGER PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
+        queued_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS embed_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT OR IGNORE INTO embed_queue(page_id) SELECT id FROM pages;
     """
 )
 
@@ -435,6 +469,7 @@ _REQUIRED_OBJECTS = {
         "change_seq", "page_types", "source_types", "link_rels", "pages",
         "slug_aliases", "tags", "page_tags", "links", "revisions",
         "tombstones", "media", "pages_fts", "corrections",
+        "page_chunks", "embed_queue", "embed_config",
     },
     "index": {
         "idx_pages_type", "idx_pages_status", "idx_pages_updated",
@@ -443,6 +478,7 @@ _REQUIRED_OBJECTS = {
         "idx_revisions_author", "idx_revisions_client", "idx_pagetags_tag",
         "idx_links_target", "idx_slug_aliases_page", "idx_tombstones_seq",
         "idx_media_page", "idx_media_sha", "idx_corrections_status",
+        "idx_page_chunks_page",
     },
     "trigger": {
         "pages_slug_guard", "pages_slug_guard_upd", "alias_slug_guard",
@@ -479,6 +515,12 @@ _EXPECTED_COLUMNS = {
         "id", "page_slug", "selected_text", "note", "status",
         "created_at", "resolved_at", "resolved_by",
     ),
+    "page_chunks": (
+        "chunk_id", "page_id", "seq", "heading_path", "body", "char_count",
+        "embedding_model", "embedding_dim", "embedded_at", "stale",
+    ),
+    "embed_queue": ("page_id", "queued_at"),
+    "embed_config": ("key", "value"),
 }
 
 _SEEDS = {
@@ -655,6 +697,21 @@ def init_db(path: str | Path) -> sqlite3.Connection:
         # need them added here so the schema check below stays authoritative.
         # CREATE TABLE/INDEX IF NOT EXISTS makes this a no-op when current.
         conn.executescript(_MIGRATIONS_SQL)
+        # Materialize deterministic chunks for pages that predate semantic
+        # search. This is local SQLite work only; provider HTTP never occurs
+        # during initialization.
+        from .chunking import chunk_page
+        conn.execute("BEGIN IMMEDIATE")
+        for page in conn.execute("SELECT id, body FROM pages").fetchall():
+            if conn.execute("SELECT 1 FROM page_chunks WHERE page_id=? LIMIT 1", (page["id"],)).fetchone() is not None:
+                continue
+            for item in chunk_page(page["body"]):
+                conn.execute(
+                    "INSERT INTO page_chunks(page_id, seq, heading_path, body, char_count, stale) VALUES (?, ?, ?, ?, ?, 1)",
+                    (page["id"], item["seq"], item["heading_path"], item["body"], item["char_count"]),
+                )
+            conn.execute("INSERT OR IGNORE INTO embed_queue(page_id) VALUES (?)", (page["id"],))
+        conn.commit()
         # Always (re-)apply the connection configuration. Pragmas are
         # idempotent on an already-configured connection, and the row_factory
         # assignment is a plain attribute set. This also covers threads that

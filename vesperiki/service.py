@@ -19,7 +19,7 @@ import re
 import sqlite3
 from typing import Any, Iterable, Sequence
 
-from . import db, sections
+from . import chunking, db, embeddings, sections
 
 # Module-level DB path. Service functions open their own per-call connection.
 _DB_PATH: str | None = None
@@ -98,6 +98,18 @@ class AliasConflictError(ServiceError):
     """Raised when a slug matches a retired alias."""
 
     code = "alias_conflict"
+
+
+class SemanticSearchNotConfigured(ServiceError):
+    code = "semantic_not_configured"
+
+
+class EmbedSpaceMismatch(ServiceError):
+    code = "embed_space_mismatch"
+
+
+class EmbedProviderUnavailable(ServiceError):
+    code = "embed_provider_unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +340,50 @@ def _page_to_slim_dict(
     d = _page_to_dict(page, tags=tags)
     d.pop("body", None)
     return d
+
+
+def _sync_page_chunks(conn: sqlite3.Connection, page_id: int, body: str) -> None:
+    """Synchronize deterministic chunks and enqueue changed pages.
+
+    This helper is called only while the caller owns BEGIN IMMEDIATE. It never
+    contacts an embedding provider.
+    """
+    old = {
+        row["seq"]: row
+        for row in conn.execute(
+            "SELECT * FROM page_chunks WHERE page_id = ?", (page_id,)
+        ).fetchall()
+    }
+    changed = False
+    kept: set[int] = set()
+    for item in chunking.chunk_page(body):
+        seq = int(item["seq"])
+        kept.add(seq)
+        previous = old.get(seq)
+        same = previous is not None and (
+            previous["body"] == item["body"]
+            and previous["heading_path"] == item["heading_path"]
+        )
+        if same:
+            continue
+        changed = True
+        if previous is not None:
+            conn.execute("DELETE FROM page_chunks WHERE chunk_id = ?", (previous["chunk_id"],))
+        conn.execute(
+            "INSERT INTO page_chunks(page_id, seq, heading_path, body, char_count, stale) "
+            "VALUES (?, ?, ?, ?, ?, 1)",
+            (page_id, seq, item["heading_path"], item["body"], item["char_count"]),
+        )
+    for seq, previous in old.items():
+        if seq not in kept:
+            changed = True
+            conn.execute("DELETE FROM page_chunks WHERE chunk_id = ?", (previous["chunk_id"],))
+    if changed:
+        conn.execute(
+            "INSERT INTO embed_queue(page_id, queued_at) VALUES (?, datetime('now')) "
+            "ON CONFLICT(page_id) DO UPDATE SET queued_at=excluded.queued_at",
+            (page_id,),
+        )
 
 
 def _fetch_tags_for(
@@ -948,6 +1004,7 @@ def create_page(
 
             _sync_tags(conn, page_id, tags)
             _rebuild_derived_links(conn, page_id, body)
+            _sync_page_chunks(conn, page_id, body)
             _resolve_back_links(conn, page_id, slug)
 
             conn.commit()
@@ -1103,6 +1160,7 @@ def update_page(
 
         if body_changed:
             _rebuild_derived_links(conn, page_id, body)
+            _sync_page_chunks(conn, page_id, body)
 
         # Revision body = POST-change body (schema "body sync convention").
         # `verified_at` lives on `pages`, not `revisions` — already written above
@@ -1201,6 +1259,11 @@ def delete_page(
                 "updated_at = datetime('now'), seq = ? WHERE id = ?",
                 (new_seq, page_id),
             )
+            conn.execute(
+                "INSERT INTO embed_queue(page_id) VALUES (?) "
+                "ON CONFLICT(page_id) DO UPDATE SET queued_at=datetime('now')",
+                (page_id,),
+            )
             conn.commit()
             return {"slug": slug, "status": "deprecated", "purged": False}
 
@@ -1252,6 +1315,11 @@ def revive_page(
             (new_seq, page_id),
         )
         conn.execute(
+            "INSERT INTO embed_queue(page_id) VALUES (?) "
+            "ON CONFLICT(page_id) DO UPDATE SET queued_at=datetime('now')",
+            (page_id,),
+        )
+        conn.execute(
             "INSERT INTO revisions "
             "(page_id, body, change_type, changed_by, client) "
             "VALUES (?, ?, 'update', ?, ?)",
@@ -1260,6 +1328,168 @@ def revive_page(
         conn.commit()
 
     return get_page(slug)
+
+
+# ---------------------------------------------------------------------------
+# Optional semantic indexing and retrieval
+# ---------------------------------------------------------------------------
+
+
+def _load_vec(conn: sqlite3.Connection) -> Any:
+    try:
+        import sqlite_vec
+        sqlite_vec.load(conn)
+        return sqlite_vec
+    except (ImportError, AttributeError, sqlite3.Error) as exc:
+        raise embeddings.EmbedProviderError("sqlite-vec is unavailable") from exc
+
+
+def _ensure_vec_table(conn: sqlite3.Connection, dim: int) -> Any:
+    vec = _load_vec(conn)
+    row = conn.execute("SELECT value FROM embed_config WHERE key='dim'").fetchone()
+    if row is not None and int(row["value"]) != dim:
+        raise EmbedSpaceMismatch("embedding dimension changed; full re-embed required")
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
+    )
+    return vec
+
+
+def _embedding_space(config: embeddings.EmbedConfig, conn: sqlite3.Connection, dim: int) -> None:
+    rows = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM embed_config")}
+    if rows.get("model") and rows["model"] != config.model:
+        raise EmbedSpaceMismatch("embedding model changed; full re-embed required")
+    if rows.get("dim") and int(rows["dim"]) != dim:
+        raise EmbedSpaceMismatch("embedding dimension changed; full re-embed required")
+
+
+def drain_embed_queue(limit: int = 64) -> dict[str, Any]:
+    """Embed queued page chunks without holding a SQLite write transaction over HTTP."""
+    config = embeddings.get_config()
+    if config is None:
+        return {"configured": False, "embedded": 0, "queued": _queue_count()}
+    with db.connection(_require_db_path()) as conn:
+        pages = conn.execute(
+            "SELECT page_id FROM embed_queue ORDER BY queued_at, page_id LIMIT ?", (limit,)
+        ).fetchall()
+        chunks = []
+        for page in pages:
+            chunks.extend(conn.execute(
+                "SELECT chunk_id, body FROM page_chunks WHERE page_id=? ORDER BY seq", (page["page_id"],)
+            ).fetchall())
+    if not chunks:
+        return {"configured": True, "embedded": 0, "queued": 0}
+    try:
+        vectors = embeddings.embed_texts([row["body"] for row in chunks])
+    except embeddings.EmbedProviderUnavailable as exc:
+        return {"configured": True, "embedded": 0, "queued": _queue_count(), "error": str(exc)}
+    except embeddings.EmbedError:
+        raise
+    dim = len(vectors[0])
+    with db.connection(_require_db_path()) as conn:
+        _embedding_space(config, conn, dim)
+        vec = _ensure_vec_table(conn, dim)
+        blob = vec.serialize_float32
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT OR REPLACE INTO embed_config(key,value) VALUES('model',?)", (config.model,))
+        conn.execute("INSERT OR REPLACE INTO embed_config(key,value) VALUES('dim',?)", (str(dim),))
+        for row, vector in zip(chunks, vectors):
+            conn.execute("DELETE FROM chunk_vec WHERE chunk_id=?", (row["chunk_id"],))
+            conn.execute("INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?, ?)", (row["chunk_id"], blob(vector)))
+            conn.execute(
+                "UPDATE page_chunks SET embedding_model=?, embedding_dim=?, embedded_at=datetime('now'), stale=0 WHERE chunk_id=?",
+                (config.model, dim, row["chunk_id"]),
+            )
+        for page in pages:
+            remaining = conn.execute(
+                "SELECT 1 FROM page_chunks WHERE page_id=? AND (embedded_at IS NULL OR stale=1)", (page["page_id"],)
+            ).fetchone()
+            if remaining is None:
+                conn.execute("DELETE FROM embed_queue WHERE page_id=?", (page["page_id"],))
+        conn.commit()
+    return {"configured": True, "embedded": len(vectors), "queued": _queue_count()}
+
+
+def _queue_count() -> int:
+    with db.connection(_require_db_path()) as conn:
+        return conn.execute("SELECT count(*) FROM embed_queue").fetchone()[0]
+
+
+def _semantic_failure_note(exc: Exception) -> str:
+    if isinstance(exc, SemanticSearchNotConfigured):
+        return "set VESPERIKI_EMBED_URL and VESPERIKI_EMBED_MODEL to enable"
+    if isinstance(exc, EmbedSpaceMismatch):
+        return "embedding model or dimension changed; re-embed required"
+    return "embedding provider unreachable"
+
+
+def search_semantic(query: str, *, limit: int = 10, include_body: bool = False,
+                    type: str | None = None, tag: str | None = None) -> list[dict]:
+    config = embeddings.get_config()
+    if config is None:
+        raise SemanticSearchNotConfigured("set VESPERIKI_EMBED_URL and VESPERIKI_EMBED_MODEL to enable semantic search")
+    if not query.strip():
+        return []
+    try:
+        vector = embeddings.embed_texts([query])[0]
+    except embeddings.EmbedProviderUnavailable as exc:
+        raise EmbedProviderUnavailable(str(exc)) from exc
+    except embeddings.EmbedProviderError as exc:
+        raise ServiceError(str(exc)) from exc
+    with db.connection(_require_db_path()) as conn:
+        rows = conn.execute("SELECT value FROM embed_config WHERE key='dim'").fetchone()
+        if rows is None:
+            return []
+        _embedding_space(config, conn, len(vector))
+        vec = _ensure_vec_table(conn, len(vector))
+        k = max(limit * 4, limit)
+        matches = conn.execute(
+            "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ?",
+            (vec.serialize_float32(vector), k),
+        ).fetchall()
+        results: list[dict] = []
+        seen: set[int] = set()
+        for match in matches:
+            row = conn.execute(
+                "SELECT c.*, p.slug, p.title, p.type, p.body, p.status FROM page_chunks c JOIN pages p ON p.id=c.page_id WHERE c.chunk_id=?",
+                (match["chunk_id"],),
+            ).fetchone()
+            if row is None or row["status"] == "deprecated" or row["page_id"] in seen:
+                continue
+            if type is not None and row["type"] != type:
+                continue
+            if tag is not None and conn.execute(
+                "SELECT 1 FROM page_tags pt JOIN tags t ON t.id=pt.tag_id WHERE pt.page_id=? AND t.name=?",
+                (row["page_id"], tag),
+            ).fetchone() is None:
+                continue
+            seen.add(row["page_id"])
+            item = {"slug": row["slug"], "title": row["title"], "type": row["type"],
+                    "snippet": row["body"], "distance": match["distance"], "match": "semantic"}
+            if include_body:
+                item["body"] = row["body"]
+            results.append(item)
+            if len(results) >= limit:
+                break
+        return results
+
+
+def search_hybrid(query: str, *, limit: int = 10, include_body: bool = False,
+                  type: str | None = None, tag: str | None = None) -> dict:
+    keyword = search_pages(query=query, limit=limit, include_body=include_body, type=type, tag=tag)
+    try:
+        semantic = search_semantic(query, limit=limit, include_body=include_body, type=type, tag=tag)
+    except ServiceError as exc:
+        return {"results": keyword, "semantic": False, "note": _semantic_failure_note(exc), "modes": {"keyword": True, "semantic": False}}
+    fused: dict[str, tuple[float, dict]] = {}
+    for rank, item in enumerate(keyword):
+        score, existing = fused.get(item["slug"], (0.0, item))
+        fused[item["slug"]] = (score + 1 / (60 + rank + 1), existing)
+    for rank, item in enumerate(semantic):
+        score, existing = fused.get(item["slug"], (0.0, item))
+        fused[item["slug"]] = (score + 1 / (60 + rank + 1), existing)
+    results = [item for _, item in sorted(fused.values(), key=lambda pair: -pair[0])][:limit]
+    return {"results": results, "semantic": True, "modes": {"keyword": True, "semantic": True}}
 
 
 # ---------------------------------------------------------------------------
@@ -1816,6 +2046,8 @@ def admin_restore(
             "seq = ? WHERE id = ?",
             (old["body"], new_seq, page_id),
         )
+        _rebuild_derived_links(conn, page_id, old["body"])
+        _sync_page_chunks(conn, page_id, old["body"])
         cursor = conn.execute(
             "INSERT INTO revisions "
             "(page_id, body, change_type, changed_by, client, change_summary) "
