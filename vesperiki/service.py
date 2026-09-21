@@ -1349,17 +1349,24 @@ def _ensure_vec_table(conn: sqlite3.Connection, dim: int) -> Any:
     row = conn.execute("SELECT value FROM embed_config WHERE key='dim'").fetchone()
     if row is not None and int(row["value"]) != dim:
         raise EmbedSpaceMismatch("embedding dimension changed; full re-embed required")
+    existing = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_vec'"
+    ).fetchone()
+    if existing is not None:
+        match = re.search(r"FLOAT\[(\d+)\]", existing["sql"] or "", re.IGNORECASE)
+        if match is None or int(match.group(1)) != dim:
+            raise EmbedSpaceMismatch("embedding vector table dimension changed; full re-embed required")
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[{dim}])"
     )
     return vec
 
 
-def _embedding_space(config: embeddings.EmbedConfig, conn: sqlite3.Connection, dim: int) -> None:
+def _embedding_space(config: embeddings.EmbedConfig, conn: sqlite3.Connection, dim: int | None = None) -> None:
     rows = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM embed_config")}
     if rows.get("model") and rows["model"] != config.model:
         raise EmbedSpaceMismatch("embedding model changed; full re-embed required")
-    if rows.get("dim") and int(rows["dim"]) != dim:
+    if dim is not None and rows.get("dim") and int(rows["dim"]) != dim:
         raise EmbedSpaceMismatch("embedding dimension changed; full re-embed required")
 
 
@@ -1369,6 +1376,7 @@ def drain_embed_queue(limit: int = 64) -> dict[str, Any]:
     if config is None:
         return {"configured": False, "embedded": 0, "queued": _queue_count()}
     with db.connection(_require_db_path()) as conn:
+        _embedding_space(config, conn)
         pages = conn.execute(
             "SELECT page_id FROM embed_queue ORDER BY queued_at, page_id LIMIT ?", (limit,)
         ).fetchall()
@@ -1378,13 +1386,19 @@ def drain_embed_queue(limit: int = 64) -> dict[str, Any]:
                 "SELECT chunk_id, body FROM page_chunks WHERE page_id=? ORDER BY seq", (page["page_id"],)
             ).fetchall())
     if not chunks:
-        return {"configured": True, "embedded": 0, "queued": 0}
+        with db.connection(_require_db_path()) as conn:
+            for page in pages:
+                conn.execute("DELETE FROM embed_queue WHERE page_id=?", (page["page_id"],))
+            conn.commit()
+        return {"configured": True, "embedded": 0, "queued": _queue_count()}
     try:
         vectors = embeddings.embed_texts([row["body"] for row in chunks])
     except embeddings.EmbedProviderUnavailable as exc:
         return {"configured": True, "embedded": 0, "queued": _queue_count(), "error": str(exc)}
     except embeddings.EmbedError:
         raise
+    if len(vectors) != len(chunks):
+        raise embeddings.EmbedProviderError("embedding response count does not match queued chunks")
     dim = len(vectors[0])
     with db.connection(_require_db_path()) as conn:
         _embedding_space(config, conn, dim)
@@ -1430,6 +1444,8 @@ def search_semantic(query: str, *, limit: int = 10, include_body: bool = False,
         raise SemanticSearchNotConfigured("set VESPERIKI_EMBED_URL and VESPERIKI_EMBED_MODEL to enable semantic search")
     if not query.strip():
         return []
+    with db.connection(_require_db_path()) as conn:
+        _embedding_space(config, conn)
     try:
         vector = embeddings.embed_texts([query])[0]
     except embeddings.EmbedProviderUnavailable as exc:
@@ -1479,7 +1495,7 @@ def search_hybrid(query: str, *, limit: int = 10, include_body: bool = False,
     keyword = search_pages(query=query, limit=limit, include_body=include_body, type=type, tag=tag)
     try:
         semantic = search_semantic(query, limit=limit, include_body=include_body, type=type, tag=tag)
-    except ServiceError as exc:
+    except (ServiceError, embeddings.EmbedError) as exc:
         return {"results": keyword, "semantic": False, "note": _semantic_failure_note(exc), "modes": {"keyword": True, "semantic": False}}
     fused: dict[str, tuple[float, dict]] = {}
     for rank, item in enumerate(keyword):

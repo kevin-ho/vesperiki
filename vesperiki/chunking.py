@@ -25,9 +25,11 @@ def _paragraph_chunks(text: str, target: int = TARGET_CHARS) -> list[str]:
     # split only at newline/character boundaries, which keeps fenced code intact.
     final: list[str] = []
     for chunk in chunks:
-        if len(chunk) <= target or chunk.count("```") % 2:
-            # A fenced block is an atomic unit. It may exceed the soft target,
-            # but splitting it would produce invalid Markdown/code.
+        if len(chunk) <= target or "```" in chunk:
+            # Keep any paragraph containing fenced Markdown atomic. This is
+            # deliberately stronger than counting delimiters: an overlong
+            # paragraph with two complete fences is still invalid if split
+            # between the fences.
             final.append(chunk)
             continue
         start = 0

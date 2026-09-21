@@ -461,7 +461,7 @@ def _search(args: dict[str, Any]) -> Any:
         return result
     except service.SemanticSearchNotConfigured as exc:
         return {"results": service.search_pages(**kwargs), "mode_served": "keyword", "note": str(exc)}
-    except service.ServiceError as exc:
+    except (service.ServiceError, service.embeddings.EmbedError) as exc:
         return {"results": service.search_pages(**kwargs), "mode_served": "keyword", "note": str(exc)}
 
 

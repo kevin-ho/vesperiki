@@ -68,6 +68,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         raise EmbedProviderError("embedding inputs must be non-empty text")
 
     output: list[list[float]] = []
+    output_dim: int | None = None
     headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
     try:
         with httpx.Client(timeout=config.timeout) as client:
@@ -96,6 +97,10 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
                 if len(dims) != 1:
                     raise EmbedProviderError("embedding response vectors have inconsistent dimensions")
                 actual_dim = len(vectors[0])
+                if output_dim is None:
+                    output_dim = actual_dim
+                elif actual_dim != output_dim:
+                    raise EmbedProviderError("embedding response vectors have inconsistent dimensions")
                 if config.dim is not None and actual_dim != config.dim:
                     raise EmbedProviderError("embedding response dimension does not match VESPERIKI_EMBED_DIM")
                 output.extend(vectors)

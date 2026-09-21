@@ -460,7 +460,6 @@ _MIGRATIONS_SQL = dedent(
         queued_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS embed_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    INSERT OR IGNORE INTO embed_queue(page_id) SELECT id FROM pages;
     """
 )
 
@@ -661,6 +660,9 @@ def _verify_schema(conn: sqlite3.Connection) -> None:
 def init_db(path: str | Path) -> sqlite3.Connection:
     """Open *path*, initialize an empty database, and verify its schema."""
     conn = sqlite3.connect(str(path))
+    # Semantic chunk materialization runs before the normal connection
+    # configuration below, but it still consumes rows by column name.
+    conn.row_factory = sqlite3.Row
     try:
         if not _has_schema_objects(conn):
             # First-time init path: serialize across processes/threads.
