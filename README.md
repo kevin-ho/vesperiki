@@ -129,6 +129,28 @@ sqlite-wasm database once installed.
 | Tests                | pytest (backend), vitest + Testing Library + jsdom (FE)    |
 | Frontend package mgr | pnpm                                                       |
 
+## Semantic search (optional)
+
+Semantic search is opt-in. Configure any OpenAI-compatible embeddings endpoint;
+when unset, keyword search and all writes behave exactly as before.
+
+```bash
+# Ollama-style local endpoint
+VESPERIKI_EMBED_URL=http://localhost:11434/v1 VESPERIKI_EMBED_MODEL=embedding-model
+# llama.cpp started with its embeddings endpoint enabled
+VESPERIKI_EMBED_URL=http://localhost:8080/v1 VESPERIKI_EMBED_MODEL=embedding-model
+# Hosted OpenAI-compatible API
+VESPERIKI_EMBED_URL=https://embedding.example/v1 VESPERIKI_EMBED_MODEL=embedding-model VESPERIKI_EMBED_API_KEY=...
+```
+
+Use `python -m vesperiki.reembed --status` to inspect coverage and
+`python -m vesperiki.reembed --full` after changing model or dimension. The
+client batches requests, never logs the API key, and writes queue state before
+any provider call. Keep chunks sized for the selected provider's input limit.
+
+MCP clients pass the same values through `mcpServers.vesperiki.env` alongside
+`VESPERIKI_DB_PATH` and the writer identity.
+
 ## Configuration
 
 | Variable                  | Default              | Purpose                                              |
@@ -166,7 +188,9 @@ JSON clients):
         "VESPERIKI_DB_PATH": "/path/to/vesperiki/vesperiki.db",
         "VESPERIKI_WRITER": "agent-name",
         "VESPERIKI_CLIENT": "agent-runtime",
-        "VESPERIKI_MODE": "full"
+        "VESPERIKI_MODE": "full",
+        "VESPERIKI_EMBED_URL": "http://localhost:11434/v1",
+        "VESPERIKI_EMBED_MODEL": "embedding-model"
       }
     }
   }
@@ -200,6 +224,10 @@ ExecStart=/opt/vesperiki/.venv/bin/python -m vesperiki.api
 Environment=VESPERIKI_HOST=127.0.0.1
 Environment=VESPERIKI_PORT=7421
 Environment=VESPERIKI_DB_PATH=/opt/vesperiki/vesperiki.db
+# Optional semantic search:
+# Environment=VESPERIKI_EMBED_URL=http://localhost:11434/v1
+# Environment=VESPERIKI_EMBED_MODEL=embedding-model
+# Environment=VESPERIKI_EMBED_API_KEY=
 Restart=on-failure
 
 [Install]

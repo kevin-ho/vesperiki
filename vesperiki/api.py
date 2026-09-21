@@ -461,18 +461,33 @@ def _register_routes(app: FastAPI, db_path: str) -> None:
     @app.get("/api/search")
     def search(
         q: str = Query(..., min_length=1),
+        mode: str = Query("keyword", pattern="^(keyword|semantic|hybrid)$"),
         limit: int = Query(10, ge=1, le=100),
         include_body: bool = Query(False),
         tag: str | None = Query(None),
         type: str | None = Query(None),
-    ) -> list[dict[str, Any]]:
-        return service.search_pages(
-            query=q,
-            limit=limit,
-            include_body=include_body,
-            tag=tag,
-            type=type,
-        )
+    ) -> Any:
+        keyword = service.search_pages(query=q, limit=limit, include_body=include_body, tag=tag, type=type)
+        if mode == "keyword":
+            return keyword
+        try:
+            if mode == "semantic":
+                return {"results": service.search_semantic(query=q, limit=limit, include_body=include_body, tag=tag, type=type), "semantic": True, "served_by": "semantic"}
+            return service.search_hybrid(query=q, limit=limit, include_body=include_body, tag=tag, type=type)
+        except service.ServiceError as exc:
+            return {
+                "results": keyword,
+                "semantic": False,
+                "served_by": "keyword",
+                "note": ("set VESPERIKI_EMBED_URL and VESPERIKI_EMBED_MODEL to enable" if isinstance(exc, service.SemanticSearchNotConfigured) else str(exc)),
+            }
+
+    @app.get("/api/search/semantic")
+    def search_semantic_alias(
+        q: str = Query(..., min_length=1), limit: int = Query(10, ge=1, le=100),
+        include_body: bool = Query(False), tag: str | None = Query(None), type: str | None = Query(None),
+    ) -> Any:
+        return search(q=q, mode="semantic", limit=limit, include_body=include_body, tag=tag, type=type)
 
     @app.get("/api/stale")
     def stale(days: int = Query(90, ge=1, le=3650)) -> list[dict[str, Any]]:

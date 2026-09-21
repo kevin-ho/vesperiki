@@ -83,6 +83,7 @@ _TOOLS = {
                     "default": 10,
                 },
                 "include_body": {"type": "boolean", "default": False},
+                "mode": {"type": "string", "enum": ["keyword", "semantic", "hybrid"], "default": "keyword"},
                 "tag": {"type": ["string", "null"]},
                 "type": {"type": ["string", "null"]},
             },
@@ -442,15 +443,26 @@ def _read(args: dict[str, Any]) -> dict:
     )
 
 
-def _search(args: dict[str, Any]) -> list[dict]:
+def _search(args: dict[str, Any]) -> Any:
     query = _required(args, "query")
-    return service.search_pages(
-        query=query,
-        limit=args.get("limit", 10),
-        include_body=args.get("include_body", False),
-        tag=args.get("tag"),
-        type=args.get("type"),
-    )
+    mode = args.get("mode", "keyword")
+    kwargs = {
+        "query": query, "limit": args.get("limit", 10),
+        "include_body": args.get("include_body", False),
+        "tag": args.get("tag"), "type": args.get("type"),
+    }
+    if mode == "keyword":
+        return service.search_pages(**kwargs)
+    try:
+        if mode == "semantic":
+            return {"results": service.search_semantic(**kwargs), "mode_served": "semantic"}
+        result = service.search_hybrid(**kwargs)
+        result["mode_served"] = "hybrid" if result.get("semantic") else "keyword"
+        return result
+    except service.SemanticSearchNotConfigured as exc:
+        return {"results": service.search_pages(**kwargs), "mode_served": "keyword", "note": str(exc)}
+    except service.ServiceError as exc:
+        return {"results": service.search_pages(**kwargs), "mode_served": "keyword", "note": str(exc)}
 
 
 def _meta(args: dict[str, Any]) -> dict:
