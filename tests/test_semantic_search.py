@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from vesperiki import chunking, embeddings, service
 from vesperiki.api import create_app
@@ -192,18 +193,51 @@ def test_29_rrf_deduplicates_and_uses_one_based_ranks():
     assert [item["slug"] for item in fused] == ["same", "sem", "key"]
     assert sum(item["slug"] == "same" for item in fused) == 1
 
-def test_22_api_keyword_shape(semantic_env):
-    app = create_app(str(semantic_env)); assert app is not None
+def test_22_api_semantic_unset_is_http_200_keyword_fallback(semantic_env, monkeypatch):
+    service.create_page(slug="a", title="A", body="keyword match")
+    monkeypatch.delenv("VESPERIKI_EMBED_URL")
+    monkeypatch.delenv("VESPERIKI_EMBED_MODEL")
+    response = TestClient(create_app(str(semantic_env))).get(
+        "/api/search?q=keyword+match&mode=semantic"
+    )
+    assert response.status_code == 200
+    assert response.json()["semantic"] is False
+    assert response.json()["served_by"] == "keyword"
+    assert response.json()["results"][0]["slug"] == "a"
 
-def test_23_mcp_schema_has_modes():
-    assert "mode" in mcp._TOOLS["wiki_search"].inputSchema["properties"]
 
-def test_24_import_path_enqueues(semantic_env, tmp_path):
+def test_23_mcp_provider_down_falls_back_to_keyword(semantic_env, monkeypatch):
+    service.create_page(slug="a", title="A", body="keyword match")
+
+    def down(**_kwargs):
+        raise httpx.ConnectError("provider down")
+
+    monkeypatch.setattr(httpx, "Client", down)
+    result = mcp._search({"query": "keyword match", "mode": "hybrid"})
+    assert result["mode_served"] == "keyword"
+    assert result["semantic"] is False
+    assert result["results"][0]["slug"] == "a"
+
+
+def test_24_import_path_enqueues_and_indexes(semantic_env, tmp_path):
     from vesperiki import migrate
-    p = tmp_path / "a.md"; p.write_text("# A\n\nalpha")
+
+    p = tmp_path / "a.md"
+    p.write_text("# A\n\njourney itinerary")
     migrate.migrate(tmp_path, semantic_env)
-    with service.db.connection(semantic_env) as c: assert c.execute("select count(*) from embed_queue").fetchone()[0] >= 1
+    with service.db.connection(semantic_env) as c:
+        assert c.execute("select count(*) from embed_queue").fetchone()[0] == 1
+    assert service.drain_embed_queue()["embedded"] == 1
+    assert service.search_semantic("trip")[0]["slug"] == "a"
+
 
 def test_25_vec_extension_usable(semantic_env):
-    service.create_page(slug="a", title="A", body="a"); service.drain_embed_queue()
-    assert service.search_semantic("x")
+    service.create_page(slug="a", title="A", body="semantic vector")
+    service.drain_embed_queue()
+    with service.db.connection(semantic_env) as c:
+        service._load_vec(c)
+        assert c.execute(
+            "select type from sqlite_master where name='chunk_vec'"
+        ).fetchone()[0] == "table"
+        assert c.execute("select count(*) from chunk_vec").fetchone()[0] == 1
+    assert service.search_semantic("x")[0]["slug"] == "a"
