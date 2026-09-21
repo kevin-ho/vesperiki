@@ -11,8 +11,12 @@ dependencies = [
     "uvicorn",
     "mcp>=1.10,<2",
     "httpx",
+    "sqlite-vec>=0.1,<0.2",
     "pytest",
 ]
+
+[project.scripts]
+vesperiki = "vesperiki.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["vesperiki*"]
