@@ -1,6 +1,8 @@
 # Vesperiki
 
 [![CI](https://github.com/kevin-ho/vesperiki/actions/workflows/ci.yml/badge.svg)](https://github.com/kevin-ho/vesperiki/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/kevin-ho/vesperiki/graph/badge.svg)](https://codecov.io/gh/kevin-ho/vesperiki)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **The wiki that AI maintains. The wiki that humans enjoy reading.**
 
