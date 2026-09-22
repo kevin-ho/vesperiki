@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-21
+
+### Added
+
+- Optional semantic search layer: env-defined OpenAI-compatible embeddings endpoint, section-based chunking, sqlite-vec kNN over a `chunk_vec` table, `search_semantic` and `search_hybrid` (reciprocal-rank fusion) with page-level aggregation.
+- `mode=` parameter (`keyword` / `semantic` / `hybrid`) on the REST `/api/search` endpoint and the MCP `wiki_search` tool. Default `keyword` is byte-identical to previous behavior; unset embed config degrades gracefully (useful results + honest markers, never errors).
+- `vesperiki reembed` CLI for (re)embedding the corpus; queue-based async embedding with opportunistic drain at API startup.
+- Code coverage measurement in CI with Codecov reporting.
+
+### Fixed
+
+- Backend CI now installs the package itself (`pip install -e .`) instead of a hand-typed dependency list that had silently drifted behind `pyproject.toml` when `sqlite-vec` landed — 10 contract tests ran red on GitHub CI while green locally.
+
+
+
 ## [0.1.0] - 2026-09-12
 
 Initial open-source release of Vesperiki, a self-hosted, agent-authored wiki — agents write and maintain pages through MCP tools; humans read through an offline-first PWA.
